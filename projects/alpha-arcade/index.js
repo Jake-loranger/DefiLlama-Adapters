@@ -14,6 +14,47 @@ async function getAlphaArcadeMarkets() {
     return response.data.markets;
 }
 
+async function getMarketTvl(marketAppId) {
+    let marketMatchedOrderTvl = 0;
+    let marketOpenOrderTvl = 0;
+
+    try {
+        // Get USDC in escrow account for matched orders
+        const marketAppAddress = getApplicationAddress(marketAppId);
+        const addressData = await lookupAccountByID(marketAppAddress);
+        const assets = addressData.account.assets;
+        if (assets) {
+            for (const asset of assets) {
+                if (asset['asset-id'] === USDC_ASSET_ID) {
+                    marketMatchedOrderTvl += asset.amount;
+                }
+            }
+        }
+        
+        
+        // Get USDC in each open orders' escrow account
+        const createdApplications = await lookupApplicationsCreatedByAccount(marketAppAddress);
+        for (const app of createdApplications.applications) {
+            const appAddress = getApplicationAddress(app.id);
+            const appData = await lookupAccountByID(appAddress);
+            const assets = appData.account.assets;
+            if (assets) {
+                for (const asset of assets) {
+                    if (asset['asset-id'] === USDC_ASSET_ID) {
+                        marketOpenOrderTvl += asset.amount;
+                    }
+                }
+            }
+        }
+    }
+    catch (err) {
+        // No active escrow account for this market
+        return 0;
+    }
+
+    return marketMatchedOrderTvl + marketOpenOrderTvl;
+}
+
 /**
  * Fetches the TVL in USDC held in escrow accounts across all markets on Alpha Arcade.
  * This function retrieves the market data from the Alpha Arcade API, calculates the 
@@ -25,53 +66,26 @@ async function getAlphaArcadeMarkets() {
  * @throws {Error} If the markets cannot be fetched from the Alpha Arcade API.
  */
 async function getAlphaArcadeTvl() {
-    let openOrderTvl = 0;
-    let matchedOrderTvl = 0;
+    let tvlUSD = 0;
     const markets = await getAlphaArcadeMarkets();
 
     for (const market of markets) {
-        if (!market.marketAppId) continue;
         const marketAppId = market.marketAppId;
 
-        try {
-            // Get application escrow account
-            const marketAppAddress = getApplicationAddress(marketAppId);
-
-            // Get amount of USDC in escrow account
-            const addressData = await lookupAccountByID(marketAppAddress);
-
-            // Add amount to total tvl in USD
-            const assets = addressData.account.assets;
-            if (assets) {
-                for (const asset of assets) {
-                    if (asset['asset-id'] === USDC_ASSET_ID) {
-                        matchedOrderTvl += asset.amount;
-                    }
-                }
+        if (market.options && market.options.length > 1) {
+            // Multi-option market: sum TVL for all options and include each option's TVL
+            for (const option of market.options) {
+                if (!option.marketAppId) continue;
+                const optionTvl = await getMarketTvl(option.marketAppId);
+                tvlUSD += optionTvl;
             }
-
-
-            // For each created application, find application address and add its USDC balance
-            const createdApplications = await lookupApplicationsCreatedByAccount(marketAppAddress);
-            for (const app of createdApplications.applications) {
-                const appAddress = getApplicationAddress(app.id);
-                const appData = await lookupAccountByID(appAddress);
-                const assets = appData.account.assets;
-                if (assets) {
-                    for (const asset of assets) {
-                        if (asset['asset-id'] === USDC_ASSET_ID) {
-                            openOrderTvl += asset.amount;
-                        }
-                    }
-                }
-            }
-
-        } catch (err) {
-            // No active escrow account for this market
-            continue;
+        } else {
+            // Single market
+            const marketTvl = await getMarketTvl(marketAppId);
+            tvlUSD += marketTvl;
         }
     }
-    const tvlUSD = matchedOrderTvl + openOrderTvl;
+
     return tvlUSD / 1e6; // Convert from microUSDC
 }
 
